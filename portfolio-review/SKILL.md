@@ -1,15 +1,16 @@
 ---
 name: portfolio-review
 description: |
-  Parse Indian HNI/family portfolio statements into a consolidated Excel workbook with distribution income tracking and XIRR.
-  Trigger on: CAMS, KFintech, Zerodha holdings/dividends/CSV, HDFC Securities equity summaries and P&L reports, PMS, AIF statements, Schwab CSV, ICICI Direct, Groww/Kuvera, NSDL/CDSL CAS.
-  Supports FAMILY PORTFOLIOS (self, spouse, HUF, parents, trusts), GOOGLE DRIVE integration, GMAIL search for REIT/InvIT/AIF distribution advices.
-  DISTRIBUTION + P&L TRACKING: parses dividend files, email distribution advices, HDFC P&L summaries, AIF income to build comprehensive income history, realized gains, and true XIRR.
-  Triggers: "review my portfolio", "family portfolio", "consolidate holdings", "check email for distributions", "dividend income", "XIRR with distributions", or upload of financial PDFs/Excel/CSV.
-  Multi-currency (USD→INR). Cross-platform and cross-member overlap detection.
+  Parse Indian HNI/family portfolio statements into a consolidated Excel workbook with distribution tracking, XIRR/CAGR, and quarterly performance.
+  Inputs: CAMS, KFintech, Zerodha, HDFC Securities, IIFL Securities, PMS, AIF, Schwab CSV, ICICI Direct, Groww/Kuvera, NSDL/CDSL CAS.
+  Family portfolios (self, spouse, HUF, parents, trusts). Google Drive + Gmail integration for distribution advices.
+  XIRR/CAGR: portfolio-level and per-holding XIRR with intermediate cashflows and distributions. Quarterly rolling XIRR from locked baseline. CAGR when no intermediate flows.
+  Distribution + P&L tracking: dividends, email advices, HDFC P&L summaries, AIF income, realized gains.
+  Triggers: "portfolio", "holdings", "consolidate", "distributions", "XIRR", "CAGR", "quarterly return", "performance", or upload of financial PDFs/Excel/CSV.
+  Multi-currency (USD→INR). Cross-platform overlap detection.
 ---
 
-# Family Portfolio Review Skill (v6)
+# Family Portfolio Review Skill (v7)
 
 Parses investment statements for one or more family members and generates a professional
 consolidated Excel workbook with family-level and member-level views, **including distribution
@@ -33,6 +34,9 @@ Multiple **family members** ("heads"), each with any combination of platforms:
 | Zerodha Dividend Files | XLSX | Dividend/distribution history by FY for REIT/InvIT/equity |
 | **HDFC Securities Equity Summary** | XLS | **Current holdings with cost, MV, realized P&L, unrealized P&L** |
 | **HDFC Securities P&L Summary** | XLS | **Calendar-year realized P&L + dividend/interest income per stock** |
+| **IIFL Securities Portfolio** | XLSX | **Current holdings with cost, MV, dividends, XIRR per stock** |
+| **IIFL Securities Dividends** | XLSX | **Dividend payout history with component breakdown** |
+| **Demat Statement (any broker)** | XLS | **Transaction history — credits/debits, qty changes, NO cost basis** |
 | PMS Statements (any provider) | PDF | Stock-level holdings, cost, market value, cash, performance |
 | AIF Statements (any provider) | PDF | Capital committed/called, NAV, market value, distributions, drawdowns |
 | Charles Schwab Positions | CSV | US ETFs, stocks — prices in USD, convert to INR |
@@ -61,6 +65,9 @@ Read `references/parsing-guide.md` for format-specific extraction rules.
 - `Equity_Summary_Details*.xls` → HDFC Securities current holdings
 - `*Profit_And_Loss_Summary*.xls` → HDFC Securities calendar-year P&L
 - `CAS_*.pdf` with CAMS/KFintech headers → CAMS Consolidated Account Summary
+- `Report.xlsx` with Scrip Name/Qty/Purchase Price columns → IIFL Securities
+- `*dividend*.xlsx` with Scrip Name/Date/Amount columns → IIFL Securities dividends
+- `Demat_Statement.xls` with Client Id/Date/Name/Quantity → Broker demat transaction history (NO cost basis)
 - Account numbers in filenames (e.g., `1518693`) → map to HDFC Securities client ID
 
 ### Step 2: Parse Each Statement
@@ -97,14 +104,34 @@ Hybrid-BAF/MultiAsset, Hybrid-LongShort, Debt-BankingPSU, Debt-Gilt, Debt-Target
 
 See `references/parsing-guide.md` Sections 8, 9, and 11 for parsing details.
 
-### Step 5: Calculate XIRR with Distributions
+### Step 5: Calculate XIRR / CAGR
 
-Calculate three scenarios:
+See `references/parsing-guide.md` Section 15 for full computation methodology.
+
+**Portfolio-Level XIRR (Quarterly Tracking)**
+
+The family runs quarterly XIRR tracking from a locked baseline date.
+Each quarter, compute rolling XIRR from baseline using all intermediate cashflows.
+
+- **Baseline**: locked start date + starting portfolio value (negative cashflow = investment)
+- **End**: current quarter-end date + current portfolio value (positive cashflow = redemption)
+- **Intermediate cashflows**: any net new money IN (negative) or withdrawals OUT (positive) between quarters
+- If no intermediate cashflows, XIRR = CAGR (they are identical for 2-point calculations)
+
+**Per-Holding XIRR (with distributions)**
+
+Calculate three scenarios per holding or member:
 1. **MV-only XIRR** — just cost→MV, no distributions
-2. **+ Primary member distributions** — add that member's dividends
-3. **+ All distributions** — add all known distributions (family-wide)
+2. **+ Distributions** — add that member's dividends/interest as positive cashflows on their dates
+3. **+ Realized P&L** — include realized gains/losses for sold positions
 
-Use **gross** amounts (pre-TDS) for economic return. Lump-sum assumption is conservative.
+Use **gross** amounts (pre-TDS) for economic return.
+
+**XIRR vs CAGR**
+- CAGR = (End/Start)^(1/years) - 1. Only valid with no intermediate cashflows.
+- XIRR = IRR with irregular cashflows. Required when money moves in/out at different dates.
+- For a closed portfolio (no additions/withdrawals), XIRR = CAGR.
+- Always compute XIRR; report CAGR only when identical (no intermediate flows).
 
 ### Step 6: Build Excel Workbook
 Read `references/excel-template.md` for formatting rules.
@@ -145,5 +172,8 @@ Save to `/mnt/user-data/outputs/` → `[Surname]_Family_Portfolio_Review_[Date].
 - **Zerodha holdings.csv**: Simple CSV with Instrument/Qty/Avg.cost/LTP/Invested/Cur.val/P&L columns. May contain just 1 holding (e.g., LIQUIDCASE as cash equivalent).
 - **Active REIT/InvIT traders**: Some family members actively buy/sell REITs/InvITs for both distributions AND capital gains. Track BOTH income streams. Flag when realized losses exceed distributions (net negative outcome).
 - **Gmail for distributions**: REIT/InvIT distribution advices from KFintech/LinkIntime. Quarterly.
+- **IIFL Securities**: Report.xlsx provides holdings with XIRR per stock. Dividend file has per-payout detail but components are unlabeled — infer from amount patterns.
+- **Demat statements**: Only show qty transactions (credits/debits), NOT cost basis. Flag cost as "estimated" and add action item to get contract notes.
+- **Cross-platform same security**: A single person may hold the same ISIN across multiple brokers (e.g., Brookfield REIT in HDFC + IIFL). Track separately, report combined totals.
 - Use openpyxl. Always run recalc script. Navy/gold theme.
 - Cross-member holdings: flag for awareness, not consolidation.

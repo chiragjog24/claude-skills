@@ -437,3 +437,218 @@ When the user points to a Google Drive folder:
 - [ ] **XIRR calculated in 3 scenarios**: MV-only, + primary member, + all distributions
 - [ ] **DPU trends noted** for REIT/InvIT holdings
 - [ ] **Realized P&L** aggregated per member where available (HDFC P&L files)
+
+---
+
+## 13. IIFL Securities Portfolio Report (XLSX)
+
+### Identifier
+Filename: `Report.xlsx` or similar from IIFL Securities web export.
+
+### Structure
+Single sheet "Report". Row 1 = header, Row 2+ = holdings.
+
+### Column Mapping
+```
+Scrip Name | Qty | Purchase Price | Invested Value | Current Price | Current Value |
+Dividends Announced | XIRR % | 3yr Returns | Net Profit/ Loss | Profit/ Loss %
+```
+
+### Extraction Code
+```python
+import pandas as pd
+df = pd.read_excel('Report.xlsx', header=1)  # row 1 is header
+for _, row in df.iterrows():
+    scrip = row['Scrip Name '].strip()
+    qty = int(row['Qty'])
+    avg_cost = float(row['Purchase Price'])
+    invested = float(row['Invested Value'])
+    cmp = float(row['Current Price'])
+    cur_val = float(row['Current Value'])
+    div = row['Dividends Announced']
+    xirr = float(row['XIRR %']) / 100 if row['XIRR %'] != '-' else None
+    pnl = float(row['Net Profit/ Loss'])
+```
+
+### Symbol Mapping
+| IIFL Scrip | Full Name | ISIN | Type |
+|-----------|-----------|------|------|
+| BIRET | Brookfield India Real Estate Trust | INE0FDU25010 | REIT |
+| INDIGRID | IndiGrid Infrastructure Trust | INE219X23014 | InvIT |
+| GIPCL | Gujarat Industries Power Company | — | Equity |
+
+### Notes
+- IIFL provides XIRR per holding — useful cross-check
+- "Dividends Announced" may differ from actual received (announced vs paid)
+- Penny stocks (sub-₹10 CMP, <₹1K invested) — flag for cleanup
+- Cross-platform overlap: Same ISIN may be held in HDFC Securities or Zerodha — do NOT double-count, track separately
+
+---
+
+## 14. IIFL Securities Dividend File (XLSX)
+
+### Identifier
+Filename: `iifl-biret-dividend.xlsx` or similar IIFL dividend export.
+
+### Structure
+Single sheet. Row 0 = header. Row 1 = Grand Total. Rows 2+ = individual dividend entries.
+
+### Column Mapping
+```
+Scrip Name | Date | Amount
+```
+
+### Key Patterns
+- **Row 1 is always "Grand Total"** — skip this for parsing, use for validation
+- Dates may be in mixed formats: `2025-06-08 00:00:00` or `13/09/2024`
+- Amount = 0 means record date entry (no payout on that date)
+- **Multiple rows on same date = component breakdown** (Interest, Dividend, Repayment, Other)
+  - Largest amount is typically Dividend
+  - Second largest is typically Interest or Repayment
+  - Small amounts may be "Other Income"
+- Components are NOT labeled in the file — must infer from REIT/InvIT distribution pattern
+
+### REIT/InvIT Component Inference
+For same-date multiple entries, order by amount descending:
+1. Largest → Dividend (exempt or 10% TDS)
+2. Second → Interest (10% TDS) or Repayment/Return of Capital (no TDS)
+3. Third → Repayment or Other
+4. Fourth → Other Income
+
+Cross-reference with Gmail distribution advices for exact component labeling.
+
+### Extraction Code
+```python
+import pandas as pd
+df = pd.read_excel('iifl-biret-dividend.xlsx')
+# Skip Grand Total row
+df = df.iloc[1:]
+# Filter non-zero amounts
+df = df[df['Amount'].apply(lambda x: float(str(x).replace(',','')) if x != '-' else 0) > 0]
+for _, row in df.iterrows():
+    scrip = row['Scrip Name']
+    date = str(row['Date'])
+    amount = float(str(row['Amount']).replace(',',''))
+```
+
+### Notes
+- Grand Total in file may include ₹0 entries — validate against sum of non-zero amounts
+- Historical entries for securities no longer held (e.g., IndiGrid small amounts from prior holdings)
+- GIPCL dividends are standard equity dividends (no component breakdown)
+- Use dates as XIRR cashflow dates
+
+---
+
+## 15. XIRR / CAGR Computation
+
+### When to Use Which
+
+| Scenario | Method | Formula |
+|----------|--------|---------|
+| No intermediate cashflows (closed portfolio) | CAGR = XIRR | (End/Start)^(365.25/days) - 1 |
+| Money added or withdrawn at known dates | XIRR | Solve: Σ CF_i / (1+r)^(t_i/365.25) = 0 |
+| Per-holding with distributions on known dates | XIRR | Cost as -ve on buy date, each distribution as +ve, MV as +ve on end date |
+
+### Python Implementation
+
+```python
+from scipy.optimize import brentq
+from datetime import datetime
+
+def xirr(cashflows):
+    """cashflows = list of (date, amount). Negative = outflow, positive = inflow."""
+    def npv(rate):
+        t0 = cashflows[0][0]
+        return sum(cf / (1 + rate) ** ((d - t0).days / 365.25) for d, cf in cashflows)
+    return brentq(npv, -0.5, 10.0)
+
+def cagr(start_val, end_val, start_date, end_date):
+    """Simple CAGR — identical to 2-point XIRR."""
+    years = (end_date - start_date).days / 365.25
+    return (end_val / start_val) ** (1 / years) - 1
+```
+
+### Quarterly Family Portfolio XIRR Tracking
+
+The family portfolio uses a locked baseline for rolling XIRR computation each quarter.
+
+**Cashflow structure:**
+```python
+flows = [
+    (baseline_date, -starting_value),        # Initial portfolio value (outflow)
+    # ... any intermediate net additions (negative) or withdrawals (positive) ...
+    (quarter_end_date, current_portfolio_value),  # Current value (inflow)
+]
+rate = xirr(flows)
+```
+
+**Intermediate cashflows to capture:**
+- Fresh capital added to portfolio (e.g., salary savings invested) → negative cashflow on date
+- Money withdrawn for personal use (car purchase, flat, etc.) → positive cashflow on date
+- Internal rebalancing (redeem Fund A, buy Fund B) → NOT a cashflow (stays in portfolio)
+- Schwab USD transfers from Indian bank → NOT a cashflow if source bank was already in portfolio
+
+**Reporting:**
+- Show both XIRR and absolute gain (₹ Cr)
+- Show period in years (days / 365.25)
+- Compare to benchmarks: Nifty 50 TRI, CRISIL Composite Bond, 60/40 blend
+- If XIRR = CAGR (no intermediate flows), note this explicitly
+
+### Per-Holding XIRR (with Distributions)
+
+For REIT/InvIT/AIF holdings that generate regular income:
+
+```python
+flows = [
+    (buy_date, -invested_amount),           # Purchase cost
+    (dist_date_1, distribution_1),          # Each distribution as +ve
+    (dist_date_2, distribution_2),
+    # ...
+    (valuation_date, current_market_value), # Current MV as +ve
+]
+holding_xirr = xirr(flows)
+```
+
+**Three XIRR views per holding:**
+1. **MV-only**: just (buy_date, -cost) and (end_date, +MV)
+2. **With distributions**: add each distribution on its actual date
+3. **Net of tax**: use post-TDS distribution amounts
+
+**For sold positions (realized):**
+Replace final MV with actual sale proceeds. Distributions received before exit are still included.
+
+```python
+# Example: Capital Infra Trust — exited at loss but received distributions
+flows = [
+    (datetime(2023, 6, 15), -14654175),    # Purchase
+    (datetime(2024, 3, 20), 450000),        # Q4 FY24 distribution
+    (datetime(2024, 6, 18), 680000),        # Q1 FY25 distribution
+    # ... more distributions ...
+    (datetime(2025, 11, 15), 10702754),     # Sale proceeds
+]
+# XIRR captures BOTH the capital loss AND the income received
+```
+
+### Excel Sheet: XIRR Summary
+
+When building the portfolio workbook, add an XIRR row to the Family Summary sheet:
+
+| Metric | Value |
+|--------|-------|
+| Baseline Date | [locked date] |
+| Starting Value | ₹[X] Cr |
+| Current Date | [quarter end] |
+| Current Value | ₹[Y] Cr |
+| Absolute Gain | ₹[Y-X] Cr |
+| Period (years) | [days/365.25] |
+| XIRR / CAGR | [X.XX]% |
+| Net External Cashflows | ₹[Z] Cr (if any) |
+
+### Notes
+- Use `scipy.optimize.brentq` — robust for Indian portfolio returns (typically 5-25% range)
+- Search bounds [-0.5, 10.0] cover loss scenarios through exceptional returns
+- If brentq fails (no root), widen bounds or check for data errors
+- All amounts in INR. For USD holdings, convert to INR at transaction-date exchange rate
+- Distributions: use GROSS (pre-TDS) for economic XIRR, post-TDS for after-tax XIRR
+- FD interest: include as positive cashflow on credit date if FDs are part of portfolio
+- Bank balances: include in portfolio value if tracked as part of investable surplus
